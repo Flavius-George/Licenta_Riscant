@@ -3,12 +3,13 @@ import pickle
 import numpy as np
 
 class ManagerBazaDate:
-    def __init__(self, nume_db="galerie_licenta.db"):
-        self.nume_db = nume_db
+    def __init__(self, cale_db):
+        # Salvam string-ul cu calea, nu conexiunea directa
+        self.nume_db = cale_db 
         self.creeaza_tabel()
 
     def _conectare(self):
-        """Deschide conexiunea cu fisierul DB."""
+        """Deschide conexiunea cu fisierul DB folosind calea salvata."""
         return sqlite3.connect(self.nume_db)
 
     def creeaza_tabel(self):
@@ -28,8 +29,8 @@ class ManagerBazaDate:
                 data_poza TEXT,
                 gps TEXT,
                 cale_cache TEXT,
-                categorie TEXT,  -- Aici salvam categoria (Oameni, Natura, etc.)
-                vector_ai BLOB   -- Amprenta AI salvata ca binar
+                categorie TEXT,
+                vector_ai BLOB
             )
         ''')
         conn.commit()
@@ -57,7 +58,7 @@ class ManagerBazaDate:
                 d.get('mb'), 
                 d.get('marca'), 
                 d.get('model'), 
-                d.get('data'), 
+                d.get('data'), # Asigura-te ca in date_info cheia e 'data'
                 d.get('gps'),
                 d.get('cale_cache'),
                 d.get('categorie'), 
@@ -95,8 +96,6 @@ class ManagerBazaDate:
                 continue
         return date_ai
 
-    # --- FUNCTII NOI PENTRU SMART ALBUMS ---
-
     def numara_per_categorie(self, nume_categorie):
         """Intoarce numarul de poze dintr-o anumita categorie AI."""
         conn = self._conectare()
@@ -104,22 +103,13 @@ class ManagerBazaDate:
         cursor.execute("SELECT COUNT(*) FROM imagini WHERE categorie = ?", (nume_categorie,))
         rezultat = cursor.fetchone()
         conn.close()
-        
-        if rezultat:
-            return rezultat[0]
-        return 0
+        return rezultat[0] if rezultat else 0
 
     def obtine_cai_dupa_categorie(self, nume_categorie):
-        """Returneaza lista de cai complete (paths) pentru o anumita categorie AI."""
+        """Returneaza lista de cai complete pentru o anumita categorie AI."""
         conn = self._conectare()
         cursor = conn.cursor()
         cursor.execute("SELECT cale FROM imagini WHERE categorie = ?", (nume_categorie,))
         rezultate = cursor.fetchall()
         conn.close()
-        
-        # Transformam lista de tuple in lista simpla de cai
-        cai_finale = []
-        for r in rezultate:
-            cai_finale.append(r[0])
-            
-        return cai_finale
+        return [r[0] for r in rezultate]

@@ -13,8 +13,25 @@ from scanner_worker import ScannerWorker
 from worker import ProcesorImagine
 from sentence_transformers import SentenceTransformer
 
-# 1. INITIALIZARE COORDONATORI
-db_manager = ManagerBazaDate()
+NumeAplicatie = "GalerieLicentaAI"
+
+# Calea pentru Baza de Date (Roaming): C:/Users/Nume/AppData/Roaming/GalerieLicentaAI
+folder_app_data = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation)
+if not os.path.exists(folder_app_data):
+    os.makedirs(folder_app_data)
+
+# Calea pentru Cache (Local): C:/Users/Nume/AppData/Local/GalerieLicentaAI/cache
+folder_cache_root = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.CacheLocation)
+folder_cache = os.path.join(folder_cache_root, NumeAplicatie, "cache").replace('\\', '/')
+if not os.path.exists(folder_cache):
+    os.makedirs(folder_cache)
+
+# Initializam Managerul cu calea noua (Asigura-te ca database.py primeste calea in __init__)
+cale_db_finala = os.path.join(folder_app_data, "galerie_licenta.db").replace('\\', '/')
+db_manager = ManagerBazaDate(cale_db_finala) 
+
+print(f"[Sistem] Baza de date: {cale_db_finala}")
+print(f"[Sistem] Cache imagini: {folder_cache}")
 # Modelul pentru cautare (il incarcam global pentru a fi gata de search)
 print("Se incarca creierul AI pentru cautare...")
 model_ai = SentenceTransformer('clip-ViT-B-32')
@@ -169,17 +186,23 @@ def cand_selectez_o_imagine(index):
     cale_fisier = index_sursa.data(Qt.ItemDataRole.UserRole)
     if not cale_fisier: return
 
-    date_db = db_manager.cauta_dupa_cale(cale_fisier)
-    if date_db:
+    # REPARATIE PENTRU VITEZA:
+    # Inainte de a procesa poza de 6MB, vedem daca avem thumbnail-ul deja facut
+    cale_pt_db = cale_fisier.replace('\\', '/')
+    date_db = db_manager.cauta_dupa_cale(cale_pt_db)
+    
+    # Daca avem cache, il afisam INSTANT in panoul din dreapta
+    if date_db and date_db[10] and os.path.exists(date_db[10]):
         info_d = {
-            'cale': date_db[1], 'nume': date_db[2], 'format': date_db[3],
-            'rezolutie': date_db[4], 'mb': date_db[5], 'marca': date_db[6],
-            'model': date_db[7], 'data': date_db[8], 'gps': date_db[9]
+            'cale': date_db[1], 'nume': date_db[2], 'rezolutie': date_db[4], 
+            'mb': date_db[5], 'marca': date_db[6], 'model': date_db[7], 'gps': date_db[9]
         }
-        if date_db[10] and os.path.exists(date_db[10]):
-            actualizeaza_panou_dreapta(info_d, QtGui.QPixmap(date_db[10]))
-            return
+        # Incarcam direct Pixmap-ul din cache (e deja rotit si mic)
+        actualizeaza_panou_dreapta(info_d, QtGui.QPixmap(date_db[10]))
+        print("[UI] Incarcare instanta din Cache.")
+        return
 
+    # Daca NU avem cache (cazul rar), abia atunci pornim procesarea grea
     if procesor_activ and procesor_activ.isRunning():
         procesor_activ.terminate()
     
@@ -211,63 +234,37 @@ def cand_apas_pe_folder(index):
     index_folder_curent = index
     cale_folder = tree_model.filePath(index)
     
-    if not os.path.isdir(cale_folder): 
-        cale_folder = os.path.dirname(cale_folder)
+    if not os.path.isdir(cale_folder): cale_folder = os.path.dirname(cale_folder)
     
-    model_galerie.clear()
     formate = ('.png', '.jpg', '.jpeg', '.bmp')
     fisiere_de_afisat = []
-
-    # --- LOGICA DE SELECTIE RECURSIVA ---
     check_recursive = window.findChild(QtWidgets.QCheckBox, "checkRecursive")
     
     if check_recursive and check_recursive.isChecked():
-        # Scanam recursiv toate subfolderele (Flat View)
-        for radacina, directoare, numele_fisiere in os.walk(cale_folder):
-            for nume in numele_fisiere:
-                if nume.lower().endswith(formate):
-                    fisiere_de_afisat.append(os.path.join(radacina, nume))
+        for radacina, directoare, numei in os.walk(cale_folder):
+            for n in numei:
+                if n.lower().endswith(formate):
+                    fisiere_de_afisat.append(os.path.join(radacina, n).replace('\\', '/'))
     else:
-        # Scanam doar folderul curent
         try:
-            nume_fisiere = os.listdir(cale_folder)
-            for nume in nume_fisiere:
-                if nume.lower().endswith(formate):
-                    fisiere_de_afisat.append(os.path.join(cale_folder, nume))
-        except Exception as e: 
-            print(f"Eroare listare: {e}")
+            for n in os.listdir(cale_folder):
+                if n.lower().endswith(formate):
+                    fisiere_de_afisat.append(os.path.join(cale_folder, n).replace('\\', '/'))
+        except: pass
 
     fisiere_de_afisat.sort()
+    # REPARATIE: Folosim functia centralizata
+    populeaza_galeria_cu_cai(fisiere_de_afisat)
 
-    # Construim galeria vizuala (fara nicio simplificare)
-    for cale_full in fisiere_de_afisat:
-        nume_fisier = os.path.basename(cale_full)
-        item = QStandardItem(nume_fisier)
-        date_ex = db_manager.cauta_dupa_cale(cale_full)
-        
-        cale_icon = cale_full
-        if date_ex and len(date_ex) > 10 and date_ex[10] and os.path.exists(date_ex[10]):
-            cale_icon = date_ex[10]
-
-        item.setData(QIcon(cale_icon), Qt.ItemDataRole.DecorationRole)
-        item.setData(cale_full, Qt.ItemDataRole.UserRole)
-        model_galerie.appendRow(item)
-
-    # --- CONFIGURARE SCANNER AI ---
     if scanner_activ and scanner_activ.isRunning():
-        scanner_activ.stop()
-        scanner_activ.wait()
+        scanner_activ.stop(); scanner_activ.wait()
+    # --- MODIFICARE AICI: Pasam folderul de cache catre scanner ---
+    scanner_activ = ScannerWorker(cale_folder, folder_cache,cale_db_finala)
 
-    scanner_activ = ScannerWorker(cale_folder)
-    
-    # Conectam semnalele la functii clasice (fara lambda)
     scanner_activ.imagine_reparata.connect(actualizeaza_iconita_live)
-    scanner_activ.progres.connect(updateaza_status_progres) # <--- Functie clasica
-    
-    # Conexiunile de finalizare
+    scanner_activ.progres.connect(updateaza_status_progres)
     scanner_activ.finalizat.connect(incarca_index_faiss) 
-    scanner_activ.finalizat.connect(actualizeaza_smart_albums) # <--- Refresh la cifrele din sidebar
-
+    scanner_activ.finalizat.connect(actualizeaza_smart_albums)
     scanner_activ.start()
 
 
@@ -303,7 +300,7 @@ def execut_cautare_ai():
     
     # 4. Filtrare dupa SCOR
     # Cu "a photo of", scorurile cresc, deci 0.21 e un prag foarte sigur (safe).
-    prag_relevanta = 0.22 
+    prag_relevanta = 0.21 
     nume_gasite = []
     
     print(f"[AI Search] Rezultate gasite (Prag > {prag_relevanta}):")
@@ -382,101 +379,91 @@ def creeaza_album_inteligent():
             cand_apas_pe_smart_album(item)
 
 def executa_cautare_semantic_si_afiseaza(text_cautat):
-    """Cauta in FAISS si pune pozele direct in galerie."""
+    """Cauta in FAISS si afiseaza doar rezultatele cu relevanta ridicata."""
     if index_faiss is None or index_faiss.ntotal == 0:
         print("[Eroare] Indexul FAISS este gol. Scaneaza un folder intai.")
         return
 
     # 1. Transformam textul in vector AI
+    # Sfat: Daca scrii in romana, CLIP s-ar putea sa fie mai putin precis decat in engleza
     prompt_en = f"a photo of {text_cautat}"
     vector_cautare = model_ai.encode([prompt_en], normalize_embeddings=True).astype('float32')
 
-    # 2. Cautam cele mai bune 30 de rezultate in FAISS
-    k = min(30, index_faiss.ntotal)
+    # 2. Cautam cele mai bune 40 de rezultate (marim putin plaja de cautare)
+    k = min(40, index_faiss.ntotal)
     distante, indexuri = index_faiss.search(vector_cautare, k)
 
     # 3. Colectam caile fisierelor gasite
     cai_gasite = []
-    for i, idx in enumerate(indexuri[0]):
-        if idx != -1 and distante[0][i] > 0.18: 
-            cai_gasite.append(mapare_cai[idx])
+    
+    # REGLAJ DE FINEȚE: Pragul de 0.23 - 0.25 este "zona de aur"
+    # 0.18 = accepta aproape orice (imprecis)
+    # 0.23 = echilibrat (recomandat)
+    # 0.28 = foarte strict (doar rezultate sigure)
+    prag_relevanta = 0.23 
 
-    # --- AICI ERA PROBLEMA: Aceste rânduri trebuie sa fie SUB def ---
+    for i, idx in enumerate(indexuri[0]):
+        if idx != -1:
+            scor = distante[0][i]
+            if scor > prag_relevanta:
+                cai_gasite.append(mapare_cai[idx])
+                # Debug in consola sa vezi ce note da AI-ul
+                print(f"[Match] {os.path.basename(mapare_cai[idx])} are scorul: {scor:.4f}")
+
+    # 4. Trimitem rezultatele filtrate catre galerie
     populeaza_galeria_cu_cai(cai_gasite)
-    print(f"[AI Search] Colectie virtuala '{text_cautat}' afisata cu {len(cai_gasite)} poze.")
+    
+    if not cai_gasite:
+        print(f"[AI Search] Nu am gasit nimic destul de relevant pentru '{text_cautat}' la pragul de {prag_relevanta}")
+    else:
+        print(f"[AI Search] Afisat {len(cai_gasite)} rezultate relevante.")
+
 
 # Aceasta este o functie separata, lasata la marginea din stanga
 def populeaza_galeria_cu_cai(cai_fisiere):
-    """Sterge galeria curenta si o umple cu o lista noua de imagini."""
     model_galerie.clear()
-    
-    # Eliminam duplicatele fizice si normalizam caile
-    cai_unice = list(dict.fromkeys([os.path.normpath(c) for c in cai_fisiere]))
+    # Normalizam toate caile din lista primita pentru a se potrivi cu DB
+    cai_unice = list(dict.fromkeys([os.path.normpath(c).replace('\\', '/') for c in cai_fisiere]))
 
     for cale_full in cai_unice:
-        if not os.path.exists(cale_full):
-            continue
-            
+        if not os.path.exists(cale_full): continue
         nume_fisier = os.path.basename(cale_full)
         item = QStandardItem(nume_fisier)
         
-        date_db = db_manager.cauta_dupa_cale(cale_full)
+        # Cautam in DB - folosim aceeasi normalizare ca la salvare
+        cale_pt_db = cale_full.replace('\\', '/')
+        date_db = db_manager.cauta_dupa_cale(cale_pt_db)
         
         cale_iconita = cale_full 
+        # Verificam daca avem cache valid
         if date_db and len(date_db) > 10 and date_db[10]:
             if os.path.exists(date_db[10]):
                 cale_iconita = date_db[10]
+            else:
+                print(f"[Avertisment] Cache lipsa pe disc: {date_db[10]}")
 
         item.setData(QIcon(cale_iconita), Qt.ItemDataRole.DecorationRole)
         item.setData(cale_full, Qt.ItemDataRole.UserRole)
         model_galerie.appendRow(item)
 
 def cand_apas_pe_smart_album(item):
-    """Afiseaza in galerie toate pozele din categoria selectata, din orice folder."""
-    """Decide daca afiseaza o categorie fixa sau porneste motorul FAISS."""
+    global vizualizare_activa
+    vizualizare_activa = "smart"
     text_complet = item.text()
-    proxy_model.setFilterFixedString("") # Resetam search-ul de sus
+    proxy_model.setFilterFixedString("") 
+    
+    # REPARATIE: Sa fim siguri ca verificam simbolul corect (* sau ✨)
     if text_complet.startswith("*"):
-        # LOGICA NOUA (FAISS): Pentru albume virtuale
-        termen_cautare = text_complet.replace("* ", "")
-        executa_cautare_semantic_si_afiseaza(termen_cautare)
+        termen = text_complet.replace("* ", "")
+        executa_cautare_semantic_si_afiseaza(termen)
     else:
-        categorie = text_complet.split(" (")[0] # Luam "Documente" din "Documente (1)"
-        
-        # 1. Resetam filtrul de cautare ca sa nu ascunda noile poze
-        proxy_model.setFilterFixedString("")
-        
-        # 2. Curatam galeria curenta
-        model_galerie.clear()
-        
-        # 3. Luam de la baza de date TOATE caile care apartin acestei categorii
+        categorie = text_complet.split(" (")[0]
         cai_fisiere = db_manager.obtine_cai_dupa_categorie(categorie)
-        
         if not cai_fisiere:
-            print(f"Nu am gasit poze pentru categoria: {categorie}")
-            return
-
-        # 4. Adaugam fiecare poza gasita in galerie (exact ca la click pe folder)
-        for cale_full in cai_fisiere:
-            if not os.path.exists(cale_full):
-                continue
-                
-            nume_fisier = os.path.basename(cale_full)
-            item_galerie = QStandardItem(nume_fisier)
-            
-            # Cautam daca avem cache (iconita) in DB pentru aceasta poza
-            date_db = db_manager.cauta_dupa_cale(cale_full)
-            
-            cale_iconita = cale_full # Default e poza originala
-            if date_db and len(date_db) > 10 and date_db[10]: # Coloana cale_cache
-                if os.path.exists(date_db[10]):
-                    cale_iconita = date_db[10]
-
-            item_galerie.setData(QIcon(cale_iconita), Qt.ItemDataRole.DecorationRole)
-            item_galerie.setData(cale_full, Qt.ItemDataRole.UserRole)
-            model_galerie.appendRow(item_galerie)
-            
-        print(f"[Smart Album] Am incarcat {len(cai_fisiere)} imagini pentru {categorie}")
+            model_galerie.clear(); return
+        
+        # REPARATIE: Folosim functia centralizata
+        populeaza_galeria_cu_cai(cai_fisiere)
 
 # --- LANSAREA ---
 app = QtWidgets.QApplication(sys.argv)
@@ -507,13 +494,14 @@ view_galerie.clicked.connect(cand_selectez_o_imagine)
 
 tree_view = window.findChild(QtWidgets.QTreeView, "treeViewFolders")
 tree_model = QFileSystemModel()
+tree_model.setRootPath("")#--------------
 tree_model.setFilter(QDir.AllDirs | QDir.Files | QDir.NoDotAndDotDot)
 tree_model.setNameFilters(["*.png", "*.jpg", "*.jpeg", "*.bmp"])
 tree_model.setNameFilterDisables(False)
-cale_start = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DesktopLocation)
-tree_model.setRootPath(cale_start)
+
 tree_view.setModel(tree_model)
-tree_view.setRootIndex(tree_model.index(cale_start))
+tree_view.setRootIndex(tree_model.index(""))
+
 for i in range(1, 4): tree_view.hideColumn(i)
 tree_view.clicked.connect(cand_apas_pe_folder)
 #-----------------------------------------------------------------------------------
