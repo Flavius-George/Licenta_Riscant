@@ -204,41 +204,33 @@ class MainWindow:
             print(f"[FAISS] Index pregatit cu {len(self.mapare_cai)} vectori.")
 
     def _encode_text_query(self, text: str) -> np.ndarray:
-        """
-        Transforma un text in vector CLIP normalizat.
-        Adauga prefixul 'a photo of' pentru a alinia spatiul
-        semantic al modelului cu embeddings-urile de imagini.
-        """
-        prompt = f"a photo of {text}"
-        v = self.model_ai.encode([prompt], normalize_embeddings=True).astype("float32")
-        faiss.normalize_L2(v)
-        return v
+        """Prompt Ensembling: mediaza mai multe variante de text pentru a stabiliza cautarea."""
+        templates = [
+            f"a photo of {text}",
+            f"a close-up photo of {text}",
+            f"a blurry photo of {text}",
+            f"a high quality photo of {text}",
+            f"a picture containing {text}"
+        ]
+        # Generam vectori pentru toate variantele si calculam media lor
+        v_lista = self.model_ai.encode(templates, normalize_embeddings=True) # 
+        v_mediu = np.mean(v_lista, axis=0)
+        faiss.normalize_L2(v_mediu.reshape(1, -1)) # 
+        return v_mediu.astype("float32")
 
-    def cauta_semantic(self, text: str, k: int = 40, prag: float = PRAG_CAUTARE_SEMANTICA) -> list[str]:
-        """
-        Returneaza lista de cai ale imaginilor relevante pentru `text`.
-
-        Args:
-            text:  termenul de cautare al utilizatorului
-            k:     numarul maxim de candidati FAISS
-            prag:  scorul minim de similitudine cosinus (0-1)
-
-        Returns:
-            Lista de cai de fisiere sortate dupa relevanta.
-        """
-        if self.index_faiss.ntotal == 0:
-            return []
-
+    def cauta_semantic(self, text: str, k: int = 40, prag: float = 0.28) -> list[str]:
+        """Cautare cu prag ridicat (0.28) pentru a elimina rezultatele zgomotoase."""
+        if self.index_faiss.ntotal == 0: return []
+        
         v_query = self._encode_text_query(text)
         k_efectiv = min(k, self.index_faiss.ntotal)
-        distante, indexuri = self.index_faiss.search(v_query, k_efectiv)
+        distante, indexuri = self.index_faiss.search(v_query.reshape(1, -1), k_efectiv) # 
 
         cai_gasite = []
         for scor, idx in zip(distante[0], indexuri[0]):
-            if idx != -1 and scor > prag:
+            # Pragul de 0.28 este esential pentru a evita confuziile vizuale
+            if idx != -1 and scor > prag: 
                 cai_gasite.append(self.mapare_cai[idx])
-
-        print(f"[FAISS] '{text}' → {len(cai_gasite)} rezultate (prag={prag})")
         return cai_gasite
 
     # ----------------------------------------------------------
@@ -551,54 +543,46 @@ class MainWindow:
     # ----------------------------------------------------------
 
     def executa_organizarea_fizica(self):
-        """Copiaza imaginile intr-o ierarhie: An / Luna / Locatie / Categorie."""
-        destinatie = QFileDialog.getExistingDirectory(
-            self.window, "Alege unde vrei sa salvezi pozele organizate"
-        )
-        if not destinatie:
-            return
+        """Organizeaza pozele pe disc: An / Luna / Locatie_Curatata / Categorie AI."""
+        destinatie = QFileDialog.getExistingDirectory(self.window, "Selecteaza destinatia") # 
+        if not destinatie: return
+        
+        date_poze = self.db.obtine_toate_pentru_organizare() # 
+        if not date_poze: return
 
-        date_poze = self.db.obtine_toate_pentru_organizare()
-        if not date_poze:
-            QMessageBox.warning(self.window, "Atentie", "Baza de date este goala! Scaneaza un folder intai.")
-            return
-
-        progress = QProgressDialog(
-            "Se organizeaza colectia pe hard disk...", "Anuleaza",
-            0, len(date_poze), self.window
-        )
-        progress.setWindowModality(QtCore.Qt.WindowModal)
+        progress = QProgressDialog("Organizare pe disc...", "Anuleaza", 0, len(date_poze), self.window)
         progress.show()
 
-        succes = erori = 0
-
+        contor = 0
         for i, (cale_orig, cat_ai, data_raw, gps_raw) in enumerate(date_poze):
-            if progress.wasCanceled():
-                break
+            if progress.wasCanceled(): break
+            
+            an, luna = self._parse_data(data_raw) # 
+            
+            # Curatare riguroasa a numelui de folder GPS pentru a evita WinError 123
+            locatie_f = "Fara_Locatie"
+            if gps_raw and gps_raw not in ("", "Fara GPS"):
+                gps_curat = gps_raw
+                # Eliminam caracterele interzise de Windows din nume de folder
+                for c in [":", "|", "/", "\\", "<", ">", "*", "?", '"', "."]:
+                    gps_curat = gps_curat.replace(c, "-")
+                locatie_f = gps_curat.strip()
 
-            an, luna = self._parse_data(data_raw)
-            locatie  = self._curata_gps_pentru_folder(gps_raw)
-            categorie = cat_ai if cat_ai else "Diverse"
-
-            cale_dest = os.path.join(destinatie, an, luna, locatie, categorie).replace("\\", "/")
+            categorie_f = cat_ai if cat_ai else "Diverse"
+            cale_dest = os.path.join(destinatie, an, luna, locatie_f, categorie_f).replace("\\", "/")
+            
             try:
                 os.makedirs(cale_dest, exist_ok=True)
                 if os.path.exists(cale_orig):
                     shutil.copy2(cale_orig, os.path.join(cale_dest, os.path.basename(cale_orig)))
-                    succes += 1
-                else:
-                    erori += 1
+                    contor += 1
             except Exception as e:
-                print(f"[EROARE] {cale_orig}: {e}")
-                erori += 1
-
+                print(f"[Eroare Organizare] {e}")
+                
             progress.setValue(i + 1)
 
         QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(destinatie))
-        QMessageBox.information(
-            self.window, "Organizare Finalizata",
-            f"Procesul s-a incheiat!\n\nPoze copiate: {succes}\nErori: {erori}"
-        )
+        QMessageBox.information(self.window, "Succes", f"Organizat {contor} poze!")
 
     @staticmethod
     def _parse_data(data_raw: str | None) -> tuple[str, str]:
